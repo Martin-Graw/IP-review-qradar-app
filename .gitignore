@@ -1,0 +1,11 @@
+# Ignore all temporary files
+temp*
+
+# Ignore setup and token file
+qenv.ini
+
+# Ignore log files
+*.log
+
+# Ignore the environment itself
+venv/

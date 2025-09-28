@@ -1,0 +1,21 @@
+{
+  "name": "IP Review App",
+  "description": "An app to review IPs and manage a blocklist.",
+  "version": "1.0",
+  "image": "qradar-app-base:4.0.9",
+  "resources": {
+    "memory": 100
+  },
+  "areas": [
+    {
+      "id": "IPReviewArea",
+      "text": "IP Review",
+      "description": "IP Review and Blocking Tool",
+      "url": "index",
+      "required_capabilities": [
+        "ADMIN"
+      ]
+    }
+  ],
+  "uuid": "08daff93-b2f2-431f-b800-8ec5ce388812"
+}
