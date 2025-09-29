@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IP Review Tool</title>
+    <style>
+        body { font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 2em; }
+        h1, h2, h3 { color: #111; }
+        button { margin: 10px 10px 10px 0; padding: 8px 16px; font-size: 1em; cursor: pointer; }
+        pre { background-color: #f4f4f4; padding: 1em; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; }
+        .container { display: flex; gap: 2em; }
+        .panel { flex: 1; }
+        footer { margin-top: 2em; padding-top: 1em; }
+    </style>
+</head>
+<body>
+    <h1>IP Address Review</h1>
+
+    <div id="load_section">
+        <h2>Load Pending IPs</h2>
+        <p>Click the button to load IPs from the QRadar Reference Set.</p>
+        <button id="load_ips_button">Load IPs from QRadar</button>
+        <ul id="ip_display_list"></ul>
+        <button id="start_review_button" style="display: none;">Start Review</button>
+    </div>
+
+    <hr>
+
+    <div class="container" id="main_content" style="display: none;">
+        <div class="panel" id="review_section">
+            <h2>Current Item for Review</h2>
+            <h3 id="current_item_display"></h3>
+            <pre id="whois_data"></pre>
+            <h3>Decision</h3>
+            <button id="yes_button">Allow / Skip</button>
+            <button id="no_button">Block Subnet</button>
+        </div>
+        <div class="panel" id="blocklist_section">
+            <h2>Current Blocklist <a href="/blocklist.txt" download="blocklist.txt" style="font-size: 0.6em; font-weight: normal;">(Download)</a></h2>
+            <pre id="blocklist_display"></pre>
+        </div>
+    </div>
+    
+    <footer style="font-size: 0.8em; color: #666; text-align: left;">
+        <p>Developed by Oliver Obradovic</p>
+    </footer>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const loadSection = document.getElementById('load_section');
+        const mainContent = document.getElementById('main_content');
+        const reviewSection = document.getElementById('review_section');
+        const blocklistSection = document.getElementById('blocklist_section');
+        const loadIpsButton = document.getElementById('load_ips_button');
+        const ipDisplayList = document.getElementById('ip_display_list');
+        const startReviewButton = document.getElementById('start_review_button');
+        const currentItemDisplay = document.getElementById('current_item_display');
+        const whoisDataPre = document.getElementById('whois_data');
+        const yesButton = document.getElementById('yes_button');
+        const noButton = document.getElementById('no_button');
+        const blocklistDisplay = document.getElementById('blocklist_display');
+
+        let originalIpList = [];
+        let remainingIpList = [];
+        let currentReviewItem = null;
+        let blockedOwners = new Set(); // This will be our "session memory"
+
+        loadIpsButton.addEventListener('click', async () => {
+            loadIpsButton.textContent = 'Loading...';
+            loadIpsButton.disabled = true;
+            try {
+                const response = await fetch('get_ips');
+                if (!response.ok) { throw new Error(`HTTP error! status: ${response.status}`); }
+                const data = await response.json();
+                originalIpList = data.ips;
+                ipDisplayList.innerHTML = '';
+                if (originalIpList.length > 0) {
+                    originalIpList.forEach(ip => {
+                        const li = document.createElement('li');
+                        li.textContent = ip;
+                        ipDisplayList.appendChild(li);
+                    });
+                    startReviewButton.style.display = 'block';
+                } else {
+                    ipDisplayList.innerHTML = '<li>No pending IPs found.</li>';
+                }
+            } catch (error) { alert(`Error loading IPs: ${error}`);
+            } finally {
+                loadIpsButton.textContent = 'Load IPs from QRadar';
+                loadIpsButton.disabled = false;
+            }
+        });
+
+startReviewButton.addEventListener('click', async () => {
+    try {
+        // First, clear the old blocklist on the server
+        await fetch('clear_blocklist', { method: 'POST' });
+
+        // Now, proceed with the review
+        remainingIpList = [...originalIpList];
+        blockedOwners.clear();
+        loadSection.style.display = 'none';
+        mainContent.style.display = 'flex';
+        updateBlocklistView();
+        processNextItem();
+    } catch (error) {
+        alert('Failed to start review session. Could not clear blocklist.');
+    }
+});
+
+        async function processNextItem() {
+            setButtonsDisabled(true);
+            currentItemDisplay.textContent = '...';
+            whoisDataPre.textContent = 'Processing next subnet...';
+            try {
+                const response = await fetch('process_list', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ips: remainingIpList, blocked_owners: Array.from(blockedOwners) }),
+                });
+                if (!response.ok) { throw new Error(`HTTP error! status: ${response.status}`); }
+                const data = await response.json();
+
+                if (data.status === 'complete') {
+                    finishReview();
+                    return;
+                }
+                if (['auto_blocked', 'auto_skipped', 'error'].includes(data.status)) {
+                    remainingIpList = data.remaining_ips;
+                    if (data.status === 'auto_blocked') await updateBlocklistView();
+                    processNextItem();
+                    return;
+                }
+                currentReviewItem = data.review_item;
+                remainingIpList = data.remaining_ips;
+                currentItemDisplay.textContent = `${currentReviewItem.value} (${currentReviewItem.ip_count} IPs)`;
+                whoisDataPre.textContent = `Owner: ${currentReviewItem.owner}`;
+                setButtonsDisabled(false);
+            } catch (error) { alert(`A critical error occurred: ${error}`); }
+        }
+
+        async function updateBlocklistView() {
+            try {
+                const response = await fetch('blocklist.txt');
+                const data = await response.text();
+                blocklistDisplay.textContent = data || 'Blocklist is currently empty.';
+            } catch (error) { blocklistDisplay.textContent = 'Error loading blocklist.'; }
+        }
+
+        function finishReview() {
+            alert('Review complete!');
+            reviewSection.style.display = 'none'; // Hide only the review panel
+            loadSection.style.display = 'block';
+            startReviewButton.style.display = 'none';
+            ipDisplayList.innerHTML = '';
+}
+
+        function setButtonsDisabled(isDisabled) {
+            yesButton.disabled = isDisabled;
+            noButton.disabled = isDisabled;
+        }
+
+        yesButton.addEventListener('click', processNextItem);
+
+        noButton.addEventListener('click', async () => {
+            if (!currentReviewItem?.value) return;
+            setButtonsDisabled(true);
+            try {
+                await fetch('block', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ subnet: currentReviewItem.value }),
+                });
+                blockedOwners.add(currentReviewItem.owner); // Add owner to our session memory
+                await updateBlocklistView(); 
+                processNextItem();
+            } catch (error) {
+                alert(`Error blocking subnet: ${error}`);
+                setButtonsDisabled(false);
+            }
+        });
+    });
+    </script>
+</body>
+</html>

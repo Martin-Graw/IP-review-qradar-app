@@ -72,7 +72,6 @@ def get_ips_from_ref_set():
 
 @viewsbp.route('/process_list', methods=['POST'])
 def process_ip_list():
-    """Intelligently processes a list of IPs one subnet at a time."""
     data = request.get_json()
     ip_list_str = data.get('ips', [])
 
@@ -86,9 +85,9 @@ def process_ip_list():
 
     current_ip_obj = ip_list_obj.pop(0)
     remaining_ips_str = [str(ip) for ip in ip_list_obj]
-
+    
     if not current_ip_obj.is_global:
-        qpylib.log(f"Skipping private/reserved IP {str(current_ip_obj)}", level='INFO')
+        qpylib.log(f"Skipping private or reserved IP {str(current_ip_obj)}", level='INFO')
         return jsonify({'status': 'error', 'message': f'Skipping private/reserved IP {str(current_ip_obj)}', 'remaining_ips': remaining_ips_str})
 
     try:
@@ -128,18 +127,9 @@ def process_ip_list():
         qpylib.log(f"Error processing IP {str(current_ip_obj)}: {e}", level='ERROR')
         return jsonify({'status': 'error', 'message': f'Failed to process {str(current_ip_obj)}', 'remaining_ips': remaining_ips_str})
 
-
-@viewsbp.route('/block', methods=['POST'])
-def add_to_blocklist():
-    """Adds a single subnet to the blocklist file, checking for duplicates."""
-    data = request.get_json()
-    subnet_to_block = data.get('subnet')
-
-    if not subnet_to_block:
-        return Response("Missing 'subnet' in request body", status=400)
-
+# We need to refactor the blocking logic into its own function so we can call it from multiple places
+def add_to_blocklist_logic(subnet_to_block):
     blocklist_path = os.path.join('/opt/app-root/store', 'blocklist.txt')
-
     try:
         existing_subnets = set()
         if os.path.exists(blocklist_path):
@@ -149,74 +139,44 @@ def add_to_blocklist():
         if subnet_to_block not in existing_subnets:
             with open(blocklist_path, 'a') as f:
                 f.write(subnet_to_block + '\n')
-            return Response(f"Successfully added {subnet_to_block}", mimetype='text/plain')
-        else:
-            return Response(f"{subnet_to_block} is already in the blocklist.", mimetype='text/plain')
-
+            return True
     except Exception as e:
         qpylib.log(f"Error writing to blocklist.txt: {e}", level='ERROR')
-        return Response("Error writing to blocklist file.", status=500)
+    return False
 
-
-@viewsbp.route('/block_owner', methods=['POST'])
-def block_owner():
-    """Blocks all subnets associated with a given owner from the remaining IP list."""
+# The original /block endpoint now calls the shared logic function
+@viewsbp.route('/block', methods=['POST'])
+def add_to_blocklist():
     data = request.get_json()
-    owner_to_block = data.get('owner')
-    ip_list_str = data.get('ips', [])
-
-    if not owner_to_block or not ip_list_str:
-        return jsonify({'status': 'error', 'message': 'Missing owner or IP list.'})
-
-    subnets_to_block = set()
-    remaining_ips_str = []
+    subnet_to_block = data.get('subnet')
+    if not subnet_to_block:
+        return Response("Missing 'subnet' in request body", status=400)
     
-    for ip_str in ip_list_str:
-        try:
-            if not ipaddress.ip_address(ip_str).is_global:
-                remaining_ips_str.append(ip_str)
-                continue
-
-            whois_obj = IPWhois(ip_str)
-            whois_results = whois_obj.lookup_whois()
-            
-            owner = whois_results.get('asn_description')
-            subnet = whois_results.get('asn_cidr')
-            
-            if owner == owner_to_block and subnet:
-                subnets_to_block.add(subnet)
-            else:
-                remaining_ips_str.append(ip_str)
-        
-        except Exception as e:
-            qpylib.log(f"WHOIS lookup failed for {ip_str} during owner block: {e}", level='WARN')
-            remaining_ips_str.append(ip_str)
-
-    if subnets_to_block:
-        blocklist_path = os.path.join('/opt/app-root/store', 'blocklist.txt')
-        try:
-            existing_subnets = set()
-            if os.path.exists(blocklist_path):
-                with open(blocklist_path, 'r') as f:
-                    existing_subnets = {line.strip() for line in f}
-            
-            with open(blocklist_path, 'a') as f:
-                for subnet in subnets_to_block:
-                    if subnet not in existing_subnets:
-                        f.write(subnet + '\n')
-        except Exception as e:
-            qpylib.log(f"Error writing to blocklist during owner block: {e}", level='ERROR')
-    
-    return jsonify({'status': 'success', 'remaining_ips': remaining_ips_str})
-
+    if add_to_blocklist_logic(subnet_to_block):
+        return Response(f"Successfully added {subnet_to_block}", mimetype='text/plain')
+    else:
+        return Response(f"{subnet_to_block} is already in the blocklist.", mimetype='text/plain')
 
 @viewsbp.route('/blocklist.txt')
 def serve_blocklist():
-    """Serves the blocklist file as plaintext."""
+    # The 'store' directory is located at /opt/app-root/store inside the container
     blocklist_path = os.path.join('/opt/app-root/store', 'blocklist.txt')
     try:
         with open(blocklist_path, 'r') as f:
             content = f.read()
         return Response(content, mimetype='text/plain')
     except FileNotFoundError:
+        # If the file doesn't exist for some reason, return an empty list
         return Response('', mimetype='text/plain')
+
+@viewsbp.route('/clear_blocklist', methods=['POST'])
+def clear_blocklist():
+    blocklist_path = os.path.join('/opt/app-root/store', 'blocklist.txt')
+    try:
+        # Open the file in write mode ('w') to erase its contents
+        with open(blocklist_path, 'w'):
+            pass
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        qpylib.log(f"Error clearing blocklist.txt: {e}", level='ERROR')
+        return jsonify({'status': 'error', 'message': 'Failed to clear blocklist.'}), 500
